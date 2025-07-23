@@ -1,0 +1,912 @@
+---
+title: "Heart Failure Dataset Analysis"
+author: "Stefano Andreoli, Federico Cesare Cattò, Andrea Matteo Re"
+date: "2024-04-24"
+output: pdf_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+## Introduction
+For this project, we dealt with the Heart Failure Dataset (https://www.kaggle.com/datasets/fedesoriano/heart-failure-prediction).
+
+Cardiovascular disease represents a significant public health challenge worldwide, with millions of people affected each year. The use of machine learning models can be a valuable resource in detecting risks at an early stage and implementing targeted preventive interventions. By analysing data that includes characteristics relevant to heart disease, predictive tools can be developed to help detect potential heart problems before they become severe, enabling early diagnosis and management.
+
+## Dataset and variables
+
+The dataset was created from the combination of five datasets on twelve common characteristics. 
+This combination makes the dataset the largest source of data on heart disease for research purposes to date.
+
+It includes 918 observations with the following 12 characteristics:
+
+* **Age**: age of the patient (years)
+* **Sex**: gender of the patient 
+  + M: Male
+  + F: Female
+* **ChestPainType**: type of chest pain (the term ‘Angina’ comes from Latin and indicates the presence of a particular pain in the chest).
+  + TA: typical angina 
+  + ATA: atypical angina (does not present with classical symptoms)
+  + NAP: non-anginal pain
+  + ASY: asymptomatic (absence of pain)
+* **RestingBP**: resting blood pressure (mm/Hg)
+* **Cholesterol**: serum cholesterol (mm/dl)
+* **FastingBS**: fasting blood glucose
+  + 1: if fasting blood glucose > 120 mg/dl
+  + 0: otherwise
+* **RestingECG**: resting electrocardiogram.
+  + Normale: Normal
+  + ST: with ST-T wave abnormality (T-wave inversions and/or ST-segment elevation or depression of > 0.05 mV)
+  + LVH: showing left ventricular hypertrophy.
+* **MaxHR**: maximum heart rate achieved (numerical value between 60 and 202).
+* **ExerciseAngina**: exercise-induced angina.
+  + Y:yes
+  + N:no
+* **Oldpeak**: ST-segment underslicing (a term that refers to the position of the ST-segment in the patient's ECG) under stress compared to a resting situation. (Fig.1)
+
+```{r ex_incl_graph_3,out.width="375pt",out.height="220pt",echo=F,evol=T,fig.align="right",fig.cap=" Fig.1: Examples of ST segment elevation or depression."}
+knitr::include_graphics("C:/Users/fccat/Documents/Projects/Heart_Failure_Analysis/Images/st_elevation_st_depression.jpeg") 
+```
+* **ST_Slope**: the slope of the ST segment at the moment of maximum effort. (Fig.2)
+
+  + Up: growing
+  + Flat: costant
+  + Down: descending
+  
+```{r ex_incl_graph_2,out.width="395pt",out.height="250pt",echo=F,evol=T,fig.align="right",fig.cap="Fig.2: Types of ST segment slope"}
+knitr::include_graphics("C:/Users/fccat/Documents/Projects/Heart_Failure_Analysis/Images/st_segment_depression.png") 
+```
+* **HeartDisease**: target variable
+
+  + 1: cardiac pathology
+  + 0: normal
+  
+## Data understanding & preparation
+
+Inserting libraries and importing datasets.
+```{r message=FALSE, warning=FALSE}
+library(MASS)
+library(tidyverse)
+library(ISLR)
+library(tree)
+library(ggcorrplot)
+library(visdat)
+library(mice)
+library(naniar)
+library(UpSetR)
+library(VIM)
+library(GGally)
+library(cowplot)
+library(car)
+library(gridExtra)
+library(heplots)
+library(mclust)
+library(class)
+library(caret)
+library(ROCR)
+select=dplyr::select
+heart=read.csv("C:/Users/fccat/Documents/Projects/Heart_Failure_Analysis/heart.csv",stringsAsFactors = T)
+heart$FastingBS=as.factor(heart$FastingBS)
+heart$HeartDisease=as.factor(heart$HeartDisease)
+```
+### Missing values
+We check for missing values in the dataset.
+```{r}
+any_na(heart)
+```
+We proceed with a *summary* to check the ranges of the variables.
+```{r}
+summary(heart)
+```
+The variables **RestingBP** and **Cholesterol** cannot take zero as a value, we note how this happens in our data. We deduce that they are missing values. 
+We assign unique values to these to encode them.
+```{r}
+heart$Cholesterol[heart$Cholesterol==0]=NA
+heart$RestingBP[heart$RestingBP==0]=NA
+summary(heart)
+```
+There are 172 missing values for the variable **Cholesterol**, and only one for **RestingBP**.
+We adopt a passive strategy for **RestingBP**, eliminating the one row with no value. 
+```{r}
+heart=heart%>%filter(!is.na(RestingBP))
+```
+As far as **Cholesterol** is concerned, we will adopt an active strategy.
+
+Meanwhile, we deal with the splitting of the dataset into training, validation and test set.
+```{r message=FALSE, warning=FALSE}
+set.seed(1)
+test.index=sample(c(0:nrow(heart)),size = 0.2*nrow(heart),F)
+test=heart[test.index,]
+train_valid=anti_join(heart,test)
+validation=train_valid%>%slice_sample(prop=0.2/0.8)
+training=anti_join(train_valid,validation)
+```
+Balance check of the target class in the subsets created.
+```{r}
+table(training$HeartDisease)/nrow(training)
+table(validation$HeartDisease)/nrow(validation)
+table(test$HeartDisease)/nrow(test)
+```
+In addition to balancing between the various datasets, we also balance between the two classes of the target variable. 
+
+We create a function to calculate certain evaluation metrics such as *accuracy* and *sensitivity*, it will accept a confusion matrix as input.
+```{r}
+metriche=function(tab){
+  accuracy=sum(diag(tab))/sum(tab)
+  sensitivity=tab[2,2]/sum(tab[,2])
+  return(c("Accuracy"=accuracy,"Sensitivity"=sensitivity))
+}
+```
+Evaluation of the type and distribution of missing values.
+```{r}
+md.pattern(training, rotate.names=T)
+```
+As we have seen, they are all concentrated in the variable **Cholesterol**.
+
+Let us now check the type of missing values (MAR,MCAR,NMAR).
+```{r message=FALSE, warning=FALSE}
+g1=ggplot(training,aes(x=Age,y=after_stat(density)))+
+  geom_histogram(aes(fill=is.na(Cholesterol)),col="black",bins=15)+
+  theme_minimal()
+g2=ggplot(training,aes(x=RestingBP,y=after_stat(density)))+
+  geom_histogram(aes(fill=is.na(Cholesterol)),col="black",bins=18)+
+  theme_minimal()
+g3=ggplot(training,aes(x=MaxHR,y=after_stat(density)))+
+  geom_histogram(aes(fill=is.na(Cholesterol)),col="black",bins=15)+
+  theme_minimal()
+g4=ggplot(training,aes(x=Oldpeak,y=after_stat(density)))+
+  geom_histogram(aes(fill=is.na(Cholesterol)),col="black")+
+  theme_minimal()
+plot_grid(g1,g2,g3,g4)
+```
+
+From the graphs above, we assume that the missing values are not NMAR.
+
+
+Let us examine the correlation between variables.
+```{r}
+ggcorrplot(cor(training%>%select(where(is.numeric)),use="pairwise.complete.obs"),show.diag = F,lab = T,type = "upper")
+```
+
+
+
+
+We visualise the distributions of the variables via boxplots, so that we can also observe whether outliers are present.
+```{r}
+boxplot(training%>%select(where(is.numeric)))
+```
+
+The variables clearly assume values in different ranges. 
+
+
+## Standardising
+We have seen that the independent variables possess different ranges of variation, so let us perform a standardisation.
+As a position index we opt for the arithmetic mean while the mean square deviation will be our variability index; obviously both measures will be calculated on the training set and then used in the standardisation phase on the whole dataset.
+
+```{r}
+means=colMeans(training%>%select(where(is.numeric)),na.rm=T)
+variances=apply(training%>%select(where(is.numeric)),2,function(x){var(x,na.rm=T)})
+training_non_stand=training
+validation_non_stand=validation
+test_non_stand=test
+heart_non_stand=heart
+training[,c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak")]=scale(training%>%select(where(is.numeric)),center=means,scale = sqrt(variances))
+validation[,c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak")]=scale(validation%>%select(where(is.numeric)),center=means,scale = sqrt(variances))
+test[,c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak")]=scale(test%>%select(where(is.numeric)),center=means,scale=sqrt(variances))
+heart[,c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak")]=scale(heart%>%select(where(is.numeric)),center=means,scale=sqrt(variances))
+training_and_valid=rbind(training,validation)
+```
+## Imputation
+We try out different imputation methods provided by the *mice* package, for the treatment of missing values in the variable **Cholesterol**.
+```{r}
+matrix=matrix(1,nrow=12,ncol=12)
+matrix[,12]=0
+tempDatapmm=mice(training_and_valid,m=1,maxit=50,meth='pmm',seed=1,predictorMatrix = matrix,printFlag = F)
+tempDatamean=mice(training_and_valid,m=1,maxit=50,meth='mean',seed=1,predictorMatrix = matrix,printFlag = F)
+tempDatanorm=mice(training_and_valid,m=1,maxit=50,meth='norm',seed=1,predictorMatrix = matrix,printFlag = F)
+tempDatanorm.nob=mice(training_and_valid,m=1,maxit=50,meth='norm.nob',seed=1,predictorMatrix = matrix,printFlag = F)
+tempDatanormpred=mice(training_and_valid,m=1,maxit=50,meth='norm.predict',seed=1,predictorMatrix = matrix,printFlag = F)
+tempDataLasso=mice(training_and_valid,m=1,maxit=50,meth='lasso.norm',seed=1,predictorMatrix = matrix,printFlag = F)
+tempDatacart=mice(training_and_valid,m=1,maxit=50,meth='cart',seed=1,predictorMatrix = matrix,printFlag = F)
+mice_imputed=data.frame(
+  original = training_and_valid$Cholesterol,
+  imputed_pmm = complete(tempDatapmm)$Cholesterol,
+  imputed_cart = complete(tempDatacart)$Cholesterol,
+  imputed_lasso = complete(tempDataLasso)$Cholesterol,
+  imputed_mean = complete(tempDatamean)$Cholesterol,
+  imputed_norm = complete(tempDatanorm)$Cholesterol,
+  imputed_normpred = complete(tempDatanormpred)$Cholesterol
+)
+```
+We will now have to choose the best method, selecting the one that best respects the original distribution of the variable **Cholesterol**.
+The comparison will be made using histograms.
+```{r warning=FALSE}
+bins_FD=round(apply(mice_imputed,2,function(x) (max(x,na.rm = T)-min(x,na.rm = T))/(2*IQR(x,na.rm = T))*length(x)^(1/3)))
+mice_original=ggplot(mice_imputed, aes(x = original,y=after_stat(density))) +
+  geom_histogram(fill = "firebrick4", color = "black", position = "identity",bins=bins_FD[1]) +
+  ggtitle("Original distribution") +
+  theme_classic()
+mice_pmm= ggplot(mice_imputed, aes(x = imputed_pmm,y=after_stat(density))) +
+  geom_histogram(fill = "seagreen1", color = "black", position = "identity",bins=bins_FD[2]) +
+  ggtitle("PMM-imputed distribution") +
+  theme_classic()
+mice_cart = ggplot(mice_imputed, aes(x = imputed_cart,y=after_stat(density))) +
+  geom_histogram(fill = "royalblue2", color = "black", position = "identity",bins=bins_FD[3]) +
+  ggtitle("CART-imputed distribution") +
+  theme_classic()
+mice_lasso = ggplot(mice_imputed, aes(x = imputed_lasso,y=after_stat(density))) +
+  geom_histogram(fill = "gold3", color = "black", position = "identity",bins=bins_FD[4]) +
+  ggtitle("LR-imputed distribution") +
+  theme_classic()
+mice_mean = ggplot(mice_imputed, aes(x = imputed_mean,y=after_stat(density))) +
+  geom_histogram(fill = "magenta", color = "black", position = "identity",bins=bins_FD[5]) +
+  ggtitle("LR-imputed distribution") +
+  theme_classic()
+mice_norm = ggplot(mice_imputed, aes(x = imputed_norm,y=after_stat(density))) +
+  geom_histogram(fill = "yellow", color = "black", position = "identity",bins=bins_FD[6]) +
+  ggtitle("LR-imputed distribution") +
+  theme_classic()
+mice_normpred = ggplot(mice_imputed, aes(x = imputed_normpred,y=after_stat(density))) +
+  geom_histogram(fill = "purple", color = "black", position = "identity",bins=bins_FD[7]) +
+  ggtitle("LR-imputed distribution") +
+  theme_classic()
+plot_grid(mice_original,mice_pmm,mice_cart,mice_lasso,mice_mean,mice_norm,mice_normpred)
+```
+
+
+
+
+As there is no method that is clearly superior to the others, we choose the three best methods and make a further comparison via the *densityplot*.
+```{r}
+dens_pmm=densityplot(tempDatapmm,thicker = 0.7,main="PMM")
+dens_Lasso=densityplot(tempDataLasso,thicker = 0.7,main="Lasso")
+dens_cart=densityplot(tempDatacart,thicker = 0.7,main="Cart")
+plot(dens_pmm)
+plot(dens_Lasso)
+plot(dens_cart)
+```
+
+
+
+
+
+The most reasonable method seems to be the *cart*, let us move on to imputation on the whole dataset.
+```{r}
+training_original=training
+validation_original=validation
+heart_imputed=mice(heart,predictorMatrix = matrix,meth="cart",m=1,printFlag = F,maxit = 50,ignore=c(1:nrow(heart))%in%test.index)
+test$Cholesterol=complete(heart_imputed)[test.index,]
+training=inner_join(training_original,complete(heart_imputed),join_by(Age,Sex,ChestPainType,RestingBP,FastingBS,RestingECG,MaxHR,Oldpeak,ExerciseAngina,HeartDisease,ST_Slope))%>%
+  mutate(Cholesterol=Cholesterol.y)%>%
+  select(!contains("."))
+validation=inner_join(validation_original,complete(heart_imputed),join_by(Age,Sex,ChestPainType,RestingBP,FastingBS,RestingECG,MaxHR,Oldpeak,ExerciseAngina,HeartDisease,ST_Slope))%>%
+  mutate(Cholesterol=Cholesterol.y)%>%
+  select(!contains("."))
+```
+## Verifying assumptions
+In this section we will test the applicability of techniques such as linear discriminant analysis (*LDA*) and quadratic discriminant analysis (*QDA*).
+These techniques assume a normal distribution of the covariates conditional on the mode of the target.
+
+We check graphically whether the variables have covariance in common.
+```{r}
+covEllipses(training%>%select(where(is.numeric)), 
+            factor(training$HeartDisease), 
+            fill = TRUE, 
+            pooled = FALSE, 
+            col = c("blue", "red"),
+            variables=c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak"),
+            fill.alpha = 0.05)
+```
+
+An additional indication is provided by the conditional boxplots.
+```{r warning=FALSE}
+box1=ggplot(training,aes(y=Age,fill=HeartDisease))+
+  geom_boxplot(show.legend = F)+
+  theme_minimal()
+box2=ggplot(training,aes(y=RestingBP,fill=HeartDisease))+
+  geom_boxplot(show.legend = F)+
+  theme_minimal()
+box3=ggplot(training,aes(y=Cholesterol,fill=HeartDisease))+
+  geom_boxplot(show.legend = F)+
+  theme_minimal()
+box4=ggplot(training,aes(y=MaxHR,fill=HeartDisease))+
+  geom_boxplot(show.legend = F)+
+  theme_minimal()
+box5=ggplot(training,aes(y=Oldpeak,fill=HeartDisease))+
+  geom_boxplot(show.legend = F)+
+  theme_minimal()
+box_legend=get_legend(ggplot(training,aes(y=Age,fill=HeartDisease))+
+                        geom_boxplot(show.legend = T)+
+                        theme_minimal())
+plot_grid(box1,box2,box3,box4,box5,box_legend,ncol=3)
+```
+
+
+
+
+The information given by the boxplots is rather meagre, so let us move on to more accurate graphs.
+
+
+In order to check the conditional normality of variables, we first use *qqplots*..
+```{r}
+par(mfrow=c(2,4))
+qqnorm(training$Age[training$HeartDisease==1],main = "Age| Y=1");qqline(training$Age[training$HeartDisease==1],col=2,lwd=2)
+qqnorm(training$Age[training$HeartDisease==0],main = "Age| Y=0");qqline(training$Age[training$HeartDisease==0],col=2,lwd=2)
+qqnorm(training$RestingBP[training$HeartDisease==1],main = "RestingBP| Y=1");qqline(training$RestingBP[training$HeartDisease==1],col=2,lwd=2)
+qqnorm(training$RestingBP[training$HeartDisease==0],main = "RestingBP| Y=0");qqline(training$RestingBP[training$HeartDisease==0],col=2,lwd=2)
+qqnorm(training$MaxHR[training$HeartDisease==1],main = "MaxHR| Y=1");qqline(training$MaxHR[training$HeartDisease==1],col=2,lwd=2)
+qqnorm(training$MaxHR[training$HeartDisease==0],main = "MaxHR| Y=0");qqline(training$MaxHR[training$HeartDisease==0],col=2,lwd=2)
+qqnorm(training$Oldpeak[training$HeartDisease==1],main = "Oldpeak| Y=1");qqline(training$Oldpeak[training$HeartDisease==1],col=2,lwd=2)
+qqnorm(training$Oldpeak[training$HeartDisease==0],main = "Oldpeak| Y=0");qqline(training$Oldpeak[training$HeartDisease==0],col=2,lwd=2)
+par(mfrow=c(1,1))
+```
+From the qqplots we can see that some variables seem to distribute normally, while others are far from normal.
+For objective results we make use of some tests, such as the *Kolmogorov-Smirnov* and the *Shapiro* test.
+```{r warning=FALSE}
+apply(training%>%filter(HeartDisease==1)%>%select(where(is.numeric)),2,function(x) ks.test(x,y="dnorm")$p.value)
+apply(training%>%filter(HeartDisease==1)%>%select(where(is.numeric)),2,function(x) shapiro.test(x)$p.value)
+apply(training%>%filter(HeartDisease==0)%>%select(where(is.numeric)),2,function(x) ks.test(x,y="dnorm")$p.value)
+apply(training%>%filter(HeartDisease==0)%>%select(where(is.numeric)),2,function(x) shapiro.test(x)$p.value)
+
+```
+The tests exclude the normality of the conditional distributions of the covariates.
+Consequently, the application of both linear and quadratic discriminant analysis models will not be possible.
+
+
+
+We inspect the densities of the independent variables conditional on the target.
+```{r}
+age_dens=ggplot(training,aes(x=Age,col=HeartDisease))+
+  geom_density(linewidth=1,show.legend = F)+
+  theme_minimal()
+resting_dens=ggplot(training,aes(x=RestingBP,col=HeartDisease))+
+  geom_density(linewidth=1,show.legend = F)+
+  theme_minimal()
+maxhr_dens=ggplot(training,aes(x=MaxHR,col=HeartDisease))+
+  geom_density(linewidth=1,show.legend = F)+
+  theme_minimal()
+oldpeak_dens=ggplot(training,aes(x=Oldpeak,col=HeartDisease))+
+  geom_density(linewidth=1,show.legend = F)+
+  theme_minimal()
+choles_dens=ggplot(training,aes(x=Cholesterol,col=HeartDisease))+
+  geom_density(linewidth=1,show.legend = F)+
+  theme_minimal()
+legend=get_legend(ggplot(training,aes(x=Age,col=HeartDisease))+
+  geom_density(linewidth=1)+
+  theme_minimal())
+plot_grid(age_dens,resting_dens,maxhr_dens,oldpeak_dens,choles_dens,legend,ncol=3)
+```
+
+
+The conditionals are clearly multimodal so the assumption of normality is untenable.
+
+
+
+## Modeling
+We are in the heart of the analysis. We consider several models, for each of which we will have a classifier training phase and a validation phase to select the best model among them.
+The most appropriate evaluation metric for the problem at hand is *Sensitivity*, which indicates the percentage of correctly classified patients.
+
+This is preferred to *Accuracy* because in a medical context the correct detection of disease takes higher priority. In order to maintain an overview of the forecasting quality, we examine both.
+The two models with the highest prediction performance will be taken to the testing phase.
+
+### MDA
+Linear Discriminant Analysis and Quadratic Discriminant Analysis assume a Gaussian mixture, i.e. that the covariates distribute normally conditional on the mode of the target.
+
+Mixture Discriminant Analysis (*MDA*) is a classification method that extends the approach of *LDA* and *QDA*, assuming that the conditional distributions of the covariates are themselves mixtures of Normals.
+
+In our case, it can be seen that almost no variables respect the assumptions of *LDA* and *QDA*. We can assume that this does not apply to the *MDA* given the multimodality of the conditional distributions.
+The *MDA* attempts to estimate the parameters of internal mixtures and the one containing them;
+for classification purposes it also makes use of a posteriori probabilities.
+
+The complexity of the model assumed implies a large number of parameters to be estimated.
+For this reason, strong assumptions are usually made on the components of the mixtures within each covariate, such as homoschedasticity.
+```{r}
+mod_mda=MclustDA(training[,-12]%>%select(where(is.numeric)),class = training$HeartDisease,G=c(1:9))
+pred_mda=predict(mod_mda,validation[,-12]%>%select(where(is.numeric)))
+confmat_mda=table(pred_mda$classification,validation$HeartDisease)
+metriche(confmat_mda)
+
+```
+In order to quantify the performance of this model, we need a comparison with the following ones.
+
+
+### Classification Trees
+Classification trees do not require the imputation of missing values as they can deal directly with missing values.
+
+```{r message=FALSE, warning=FALSE}
+set.seed(8)
+tree.Heart = tree(HeartDisease ~.,data=training_original)
+summary(tree.Heart)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+plot(tree.Heart)
+text(tree.Heart,cex=0.5,pretty = 0) 
+```
+
+
+
+The variable *ST_Slope* creates the first branch, from which we deduce that it is very relevant for classification purposes.
+
+```{r message=FALSE, warning=FALSE}
+tree.pred = predict(tree.Heart , validation_original , type = "class")
+confmat_tree=table(tree.pred , validation_original$HeartDisease)
+metriche(confmat_tree)
+```
+We can see an improvement for both evaluation metrics.
+
+
+### Pruning
+Classification trees notoriously tend to be too complex, so a technique called *pruning* is applied to simplify the pre-existing tree.
+Here we opt for *cost complexity pruning*.
+```{r}
+cv.Heart = cv.tree(tree.Heart , FUN = prune.misclass)
+par(mfrow = c(1, 2))
+plot(cv.Heart$size , cv.Heart$dev,ylab="Deviance",xlab="Size", type = "b")
+plot(cv.Heart$k, cv.Heart$dev,ylab="Deviance",xlab="Alpha",ylim=c(60,150),xlim=c(0,35) ,type = "b")
+par(mfrow = c(1, 1))
+```
+```{r}
+best_size=cv.Heart$size[which.min(cv.Heart$dev)]
+prune.Heart = prune.misclass(tree.Heart , best = best_size)
+
+plot(prune.Heart)
+text(prune.Heart , pretty = 0)
+```
+```{r}
+tree.pred_pruning = predict(prune.Heart , validation_original , type = "class")
+confmat_pruning=table(tree.pred_pruning , validation_original$HeartDisease)
+metriche(confmat_pruning)
+```
+Contrary to what we would have expected, the forecast did not improve in terms of *Sensitivity*.
+
+
+### K-NN
+A further classification method is the K-NN.
+For the calculation of distances between observations, the Euclidean distance is used, which is why we code qualitative variables using *dummies*.
+```{r}
+train_dummy=training%>%mutate(Sex=ifelse(Sex=="M",1,0),ChestPainTypeATA=ifelse(ChestPainType=="ATA",1,0),ChestPainTypeNAP=ifelse(ChestPainType=="NAP",1,0),
+                           ChestPainTypeTA=ifelse(ChestPainType=="TA",1,0),RestingECGNormal=ifelse(RestingECG=="Normal",1,0),
+                           RestingECGST=ifelse(RestingECG=="ST",1,0),ExerciseAngina=ifelse(ExerciseAngina=="Y",1,0),
+                           ST_SlopeFlat=ifelse(ST_Slope=="Flat",1,0),ST_SlopeUp=ifelse(ST_Slope=="Up",1,0))
+train_dummy=train_dummy[,-c(3,6,10)]
+valid_dummy=validation%>%mutate(Sex=ifelse(Sex=="M",1,0),ChestPainTypeATA=ifelse(ChestPainType=="ATA",1,0),ChestPainTypeNAP=ifelse(ChestPainType=="NAP",1,0),
+                                ChestPainTypeTA=ifelse(ChestPainType=="TA",1,0),RestingECGNormal=ifelse(RestingECG=="Normal",1,0),
+                                RestingECGST=ifelse(RestingECG=="ST",1,0),ExerciseAngina=ifelse(ExerciseAngina=="Y",1,0),
+                                ST_SlopeFlat=ifelse(ST_Slope=="Flat",1,0),ST_SlopeUp=ifelse(ST_Slope=="Up",1,0))
+valid_dummy=valid_dummy[,-c(3,6,10)]
+
+ks=seq(1,21,by=2)
+knn_cv=apply(as.matrix(ks),1,function(x){mod_knn=knn(train_dummy[,-8],k=x,test=valid_dummy[,-8],cl=train_dummy$HeartDisease)
+confmat_knn_cv=table(mod_knn,valid_dummy$HeartDisease)
+c(x,confmat_knn_cv[2,2]/sum(confmat_knn_cv[,2]),sum(diag(confmat_knn_cv))/nrow(validation))})
+```
+The choice of hyper-parameter K is made through cross-validation.
+```{r}
+k_cv=knn_cv[1,which.max(knn_cv[2,])]
+mod_knn_cv=knn(train_dummy[,-8],k=k_cv,test=valid_dummy[,-8],cl=training$HeartDisease)
+confmat_knn=table(mod_knn_cv,validation$HeartDisease)
+```
+```{r}
+metriche(confmat_knn)
+```
+The two evaluation metrics taken into account show excellent results.
+
+
+### Logistic Regression
+In this section, we will use logistic regression as a classification method.
+
+We begin by evaluating a logistic regression by including all available variables.
+```{r}
+logistic_mod=glm(HeartDisease~. ,data = training, family="binomial")
+summary(logistic_mod)
+```
+We now evaluate the logistic regression for *step* according to the *AIC* criterion.
+```{r}
+step_logistic_mod=step(logistic_mod, direction = "both", trace = F)
+summary(step_logistic_mod)
+anova(step_logistic_mod,test = "Chisq")
+```
+We note that in the *step_logistic_mod* model there is an improvement in the *Akaike* criterion by removing the variables **Cholesterol** and **MaxHR**. 
+
+We check for outliers and influence points
+```{r}
+outlierTest(step_logistic_mod)
+```
+No outliers detected
+```{r}
+infplot=influencePlot(step_logistic_mod)
+```
+
+
+Let us try to remove the influential points highlighted by the graph, bearing in mind an initial regression model containing all variables.
+
+```{r}
+obs_inf=as.numeric(rownames(infplot))
+logistic_mod_no_inf=glm(HeartDisease~. ,data = training[-obs_inf,], family="binomial")
+summary(logistic_mod_no_inf)
+```
+We notice an improvement in terms of *AIC* compared to the two previous models.
+
+As before, we apply a *stepwise* selection to the model without influence points.
+```{r}
+step_logistic_mod_no_inf=step(logistic_mod_no_inf, direction = "both", trace = F)
+summary(step_logistic_mod_no_inf)
+anova(step_logistic_mod_no_inf,test = "Chisq")
+```
+We observe a further reduction in *AIC*. 
+
+
+We now compare the behaviour of the 4 logistic regression models found according to the metrics 
+of evaluation chosen.
+```{r}
+step_logistic_mod_no_inf_pred = round(predict(step_logistic_mod_no_inf, validation, type = "response"),0)
+confmat_step_logistic_mod_no_inf=table(step_logistic_mod_no_inf_pred , validation$HeartDisease)
+```
+Stepwise regression without influencers
+
+```{r}
+metriche(confmat_step_logistic_mod_no_inf)
+step_logistic_mod_pred = round(predict(step_logistic_mod, validation, type = "response"),0)
+confmat_step_logistic_mod=table(step_logistic_mod_pred , validation$HeartDisease)
+```
+Stepwise regression
+```{r}
+metriche(confmat_step_logistic_mod)
+logistic_mod_pred = round(predict(logistic_mod, validation, type = "response"),0)
+confmat_logistic_mod=table(logistic_mod_pred , validation$HeartDisease)
+```
+Regression
+```{r}
+metriche(confmat_logistic_mod)
+logistic_mod_no_inf_pred = round(predict(logistic_mod_no_inf, validation, type = "response"),0)
+confmat_logistic_mod_no_inf=table(logistic_mod_no_inf_pred , validation$HeartDisease)
+```
+Regression without influencers
+```{r}
+metriche(confmat_logistic_mod_no_inf)
+```
+Logistic regression is highly effective in this context, the removal of influential points has little impact on the metrics. We prefer the *stepwise* model because it contains fewer features and is therefore less complex.
+
+#### Regression Model Diagnostics
+For diagnostics, we consider the regression model with the best performance levels, i.e. the one with stepwise criteria without influence points.
+
+We plot the trend of the target variable, appropriately transformed (logit), with that of the numerical covariates. (Qualitative variables are meaningless to represent).
+```{r}
+probabilities = predict(step_logistic_mod_no_inf, type = "response")
+predictors = c("Sex","ChestPainType","Cholesterol","FastingBS","MaxHR","ExerciseAngina","Oldpeak","ST_Slope")
+logit_training=training[-obs_inf,]%>%
+  select(all_of(predictors))
+logit_training = logit_training %>%
+  mutate(logit = log(probabilities/(1-probabilities)))
+
+text = paste("\n Linearità logit-covariate")
+
+plot_grid(ggplot() + 
+  annotate("text", x = 4, y = 25, size=8, label = text) + 
+  theme_void(),
+  ggplot(data=logit_training, aes(Cholesterol,logit))+
+  geom_point(alpha=.5,col="orange")+
+  geom_smooth(method="loess",col="red")+
+  theme_minimal(),
+ggplot(data=logit_training, aes(MaxHR,logit))+
+  geom_point(alpha=.5,col="cornflowerblue")+
+  geom_smooth(method="loess",col="blue")+
+  theme_minimal(),
+ggplot(data=logit_training, aes(Oldpeak,logit))+
+  geom_point(alpha=.5,col="green")+
+  geom_smooth(method="loess",col="darkgreen")+
+  theme_minimal()
+)
+```
+
+The assumption of linearity is sufficiently verified.
+
+## Model selection
+Let us now compare the performance of the models considered, to do so we use additional metrics to those used so far for better understanding.
+```{r}
+confmats=list(mda=confmat_mda,tree=confmat_tree,pruning=confmat_pruning
+              ,knn=confmat_knn,reglog=confmat_logistic_mod,reglognf=confmat_logistic_mod_no_inf,
+              regstep=confmat_step_logistic_mod,regstepnf=confmat_step_logistic_mod_no_inf)
+sapply(confmats,metriche)
+```
+F1-Score
+```{r}
+
+f1_score=function(tab){
+  Recall=tab[2,2]/sum(tab[,2])
+  Precision=tab[2,2]/sum(tab[2,])
+  f1=2*Recall*Precision/(Recall+Precision)
+  return(f1)
+}
+sapply(confmats,f1_score)
+```
+
+From the calculated metrics we deduce that we can exclude the tree, pruned and unpruned, and the *MDA* from the analysis on the test set.
+For the logistic regressions the *F1-Score* also shows little difference.
+
+ROC curve
+```{r}
+prediction_reglog=prediction(step_logistic_mod_pred,validation$HeartDisease)
+performance(prediction_reglog,measure="auc")@y.values
+knn.pred=as.numeric(as.vector(mod_knn_cv))
+prediction_knn=prediction(knn.pred,validation$HeartDisease)
+performance(prediction_knn,measure="auc")@y.values
+```
+```{r}
+par(mfrow=c(1,2))
+plot(performance(prediction_knn,"tpr","fpr"),main="ROC K-NN")
+
+plot(performance(prediction_reglog,"tpr","fpr"),main="ROC logistic regression")
+par(mfrow=c(1,1))
+```
+These two indicators do not show substantial differences between the two models, so we will take both to the testing phase.
+
+## Testing
+In the testing phase we merge the Training and Validation Set into a single data set, on which the models will be re-trained.
+
+We again standardise and treat the missing values as before.
+```{r}
+big_training=rbind(training_non_stand,validation_non_stand)
+medie=colMeans(big_training%>%select(where(is.numeric)),na.rm=T) 
+varianze=apply(big_training%>%select(where(is.numeric)),2,function(x){var(x,na.rm=T)})
+big_training[,c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak")]=scale(big_training[,c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak")],center=medie,scale=sqrt(varianze))
+test_non_stand[,c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak")]=scale(test_non_stand[,c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak")],center=medie,scale=sqrt(varianze))
+final.test=test_non_stand
+heart_non_stand[,c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak")]=scale(heart_non_stand[,c("Age","RestingBP","Cholesterol","MaxHR","Oldpeak")],center=medie,scale=sqrt(varianze))
+final.heart=heart_non_stand
+```
+```{r}
+heart_imputato=mice(final.heart,predictorMatrix = matrix,meth="cart",m=1,printFlag = F,maxit = 50,ignore=c(1:nrow(heart))%in%test.index)
+final.test$Cholesterol=complete(heart_imputato)[test.index,"Cholesterol"]
+big_training=inner_join(big_training,complete(heart_imputato),join_by(Age,Sex,ChestPainType,RestingBP,FastingBS,RestingECG,MaxHR,Oldpeak,ExerciseAngina,HeartDisease,ST_Slope))%>%
+  mutate(Cholesterol=Cholesterol.y)%>%
+  select(!contains("."))
+```
+Logistic regression and K-NN models are being tested. 
+
+### Logistic regression :
+```{r}
+reg_log=glm(HeartDisease~. ,data = big_training, family="binomial")
+summary(reg_log)
+
+step_reg_log=step(reg_log, direction = "both", trace = F)
+summary(step_reg_log)
+```
+```{r message=FALSE}
+outlierTest(step_reg_log)
+```
+Again, we do not detect any outliers.
+
+```{r}
+confmat_test_stepreglog=table(round(predict(step_reg_log,final.test,type="response")),final.test$HeartDisease)
+```
+
+Logistic regression with *stepwise* selection
+```{r}
+metriche(confmat_test_stepreglog)
+```
+```{r include=FALSE}
+influence_plot=influencePlot(step_reg_log)
+```
+```{r}
+obs_influenti=as.numeric(rownames(influence_plot))
+step_reg_log_no_inf<-glm(HeartDisease~. ,data = training[-obs_influenti,], family="binomial")
+```
+Logistic regression with *stepwise* selection without influential points.
+```{r}
+confmat_test_stepreglog_noinf=table(round(predict(step_reg_log_no_inf,final.test,type="response")),final.test$HeartDisease)
+metriche(confmat_test_stepreglog_noinf)
+```
+### K-Nearest Neighbours:
+
+```{r}
+big_training_dummy=big_training%>%mutate(Sex=ifelse(Sex=="M",1,0),ChestPainTypeATA=ifelse(ChestPainType=="ATA",1,0),ChestPainTypeNAP=ifelse(ChestPainType=="NAP",1,0),
+       ChestPainTypeTA=ifelse(ChestPainType=="TA",1,0),RestingECGNormal=ifelse(RestingECG=="Normal",1,0),
+       RestingECGST=ifelse(RestingECG=="ST",1,0),ExerciseAngina=ifelse(ExerciseAngina=="Y",1,0),
+       ST_SlopeFlat=ifelse(ST_Slope=="Flat",1,0),ST_SlopeUp=ifelse(ST_Slope=="Up",1,0))
+big_training_dummy=big_training_dummy[,-c(3,6,10)]
+
+final_test_dummy=final.test%>%mutate(Sex=ifelse(Sex=="M",1,0),ChestPainTypeATA=ifelse(ChestPainType=="ATA",1,0),ChestPainTypeNAP=ifelse(ChestPainType=="NAP",1,0),
+                                  ChestPainTypeTA=ifelse(ChestPainType=="TA",1,0),RestingECGNormal=ifelse(RestingECG=="Normal",1,0),
+                                  RestingECGST=ifelse(RestingECG=="ST",1,0),ExerciseAngina=ifelse(ExerciseAngina=="Y",1,0),
+                                  ST_SlopeFlat=ifelse(ST_Slope=="Flat",1,0),ST_SlopeUp=ifelse(ST_Slope=="Up",1,0))
+final_test_dummy=final_test_dummy[,-c(3,7,11)]
+
+knn_cv=knn(big_training_dummy[,-8],k=k_cv,test=final_test_dummy[,-9],cl=big_training_dummy$HeartDisease)
+confmat_knn_cv=table(knn_cv,final_test_dummy$HeartDisease)
+metriche(confmat_knn_cv)
+
+```
+Comparing the *Accuracy* and *Sensitivity* metrics of the two classifiers, we deduce that the model that best classifies the test set is logistic regression selected according to the *Stepwise* criterion.
+
+## Model analysis 
+In this last section we subject the models we found best during the modelling phase to analysis. In particular, we observe whether the models may have overfitted. We then check the accuracy in both the Test and Training Set.
+
+```{r}
+knn.train.pred=knn(big_training_dummy[,-8],k=k_cv,test=big_training_dummy[,-8],cl=big_training_dummy$HeartDisease)
+confmat_knn_train=table(knn.train.pred , big_training_dummy$HeartDisease)
+```
+
+*Accuracy* K-NN in training
+```{r}
+metriche(confmat_knn_train)[1]
+```
+*Accuracy* K-NN in test
+```{r}
+metriche(confmat_knn_cv)[1]
+```
+*Accuracy* Logistic regression *stepwise* in training
+```{r}
+confmat_train_stepreglog=table(round(predict(step_reg_log,big_training,type="response")),big_training$HeartDisease)
+metriche(confmat_train_stepreglog)[1]
+```
+*Accuracy* Logistic regression *stepwise* in the test
+```{r}
+metriche(confmat_test_stepreglog)[1]
+```
+We note that K-NN has a significantly higher Error rate in the Test set than Training. This observation suggests that it is overfitting.
+In contrast, the logistic regression model from the Training to the Test set improves by a few percentage points, ruling out a possible overfitting scenario.
+
+## Test evaluation metrics
+Let us now calculate other evaluation metrics to better delineate the comparison between the two models.
+```{r}
+prediction_test_reglog=prediction(predict(step_reg_log,final.test,type="response"),final.test$HeartDisease)
+performance(prediction_test_reglog,measure="auc")@y.values
+plot(performance(prediction_test_reglog,"tpr","fpr"),main="ROC logistic regression")
+```
+
+```{r}
+prediction_knn=prediction(as.numeric(knn_cv)-1,final.test$HeartDisease)
+performance(prediction_knn,measure="auc")@y.values
+plot(performance(prediction_knn,"tpr","fpr"),main="ROC k-nn")
+```
+
+
+Looking at the AUC values, we can see that the logistic regression model prevails in the comparison with K-NN.
+
+## Threshold
+So far we have used a threshold for the a posteriori probability of 0.5, there is no guarantee that this is the best.
+We dedicate ourselves to finding the optimal threshold by looking at the error and false positive rates on the training and test set.
+```{r}
+test_train_error=function(soglia,modello=step_reg_log){
+  trpred=predict(modello,big_training,type="response")
+  testpred=predict(modello,final.test,type="response")
+  ptr=ifelse(trpred>soglia,yes = 1,no=0)
+  ptest=ifelse(testpred>soglia,1,0)
+  met1=1-metriche(table(ptr,big_training$HeartDisease))[1]
+  met2=1-metriche(table(ptest,final.test$HeartDisease))[1]
+  met3=1-metriche(table(ptr,big_training$HeartDisease))[2]
+  met4=1-metriche(table(ptest,final.test$HeartDisease))[2]
+  met=rbind(met1,met2,met3,met4)
+  rownames(met)=c("training error","test error", "training fp rate","test fp rate")
+  colnames(met)="Metriche"
+  return(met)
+}
+
+test_train_error=Vectorize(test_train_error,vectorize.args = "soglia")
+soglie=seq(0.1,0.9,by=0.05)
+errors_soglie=as.data.frame(cbind(soglie,t(test_train_error(soglie))))
+colnames(errors_soglie)=c("soglie","training_error","test_error","training_fp_rate","test_fp_rate")
+ggplot(errors_soglie,aes(x=soglie))+
+  geom_point(aes(y=training_error,col="Training Error Rate"))+
+  geom_line(aes(y=training_error,col="Training Error Rate"))+
+  geom_point(aes(y=test_error,col="Test Error Rate"))+
+  geom_point(aes(y=training_fp_rate,col="Training False Positive Rate"))+
+  geom_point(aes(y=test_fp_rate,col="Test False Positive Rate"))+
+  geom_line(aes(y=test_error,col="Test Error Rate"))+
+  geom_line(aes(y=training_fp_rate,col="Training False Positive Rate"))+
+  geom_line(aes(y=test_fp_rate,col="Test False Positive Rate"))+
+  ylab("Error Rate")+
+  theme_minimal()+
+  scale_color_manual(name="",breaks=c("Training Error Rate","Test Error Rate","Training False Positive Rate","Test False Positive Rate"),values=c("Training Error Rate"="red","Test Error Rate"="blue",
+                                                                  "Training False Positive Rate"="orange","Test False Positive Rate"="cornflowerblue"))
+```
+
+
+From the graph, we can deduce that the boundary that guarantees minimum rates on the test is 0.35.
+
+Let us determine further evaluation metrics with this new boundary and test whether it constitutes an improvement in forecast performance.
+
+```{r}
+metriche_soglia=cbind(errors_soglie[c(6,9),1],1-errors_soglie[c(6,9),-1])
+colnames(metriche_soglia)=c("soglia","training_accuracy","test_accuracy","training_sensitivity","test_sensitivity")
+metriche_soglia
+```
+As could be deduced from the graph, we have a substantial increase in the metrics considered.
+
+Let us check whether the improvement is also confirmed by more complex metrics.
+```{r}
+prob_reg_log=predict(step_reg_log,final.test,type="response")
+pred_reg_log_soglia=ifelse(prob_reg_log>0.35,yes = 1,no=0)
+confmat_best_soglia=table(pred_reg_log_soglia,final.test$HeartDisease)
+f1scores=cbind(f1_score(confmat_best_soglia),f1_score(confmat_test_stepreglog))
+colnames(f1scores)=c("F1 score 0.35","F1 score 0.5")
+f1scores
+```
+```{r}
+prob_reglog=predict(step_logistic_mod,validation,type = "response")
+logloss_reglog=-mean(step_logistic_mod_pred*log(prob_reglog)+(1-step_logistic_mod_pred)*log(1-prob_reglog))
+
+logloss_reglog_soglia=-mean(pred_reg_log_soglia*log(prob_reg_log)+(1-pred_reg_log_soglia)*log(1-prob_reg_log))
+c("Log-loss 0.35"=logloss_reglog_soglia,"Log-loss 0.5"=logloss_reglog)
+```
+
+Both confirm the improvement given by the shift in the threshold for posterior probabilities.
+
+## Conclusions
+From the results of the previous section, we can conclude that the best model is the logistic regression model with *stepwise* selection.
+```{r}
+(summ=summary(step_reg_log))
+```
+We now calculate the percentage changes in the odds induced by the variables.
+
+```{r}
+(odds_perc_var=(exp(summ$coefficients[-1,1])-1)*100)
+```
+Looking at the percentage variations, it is interesting to note that the male sex seems to be more prone to heart problems.
+Before coming to conclusions, let us look at the proportions in terms of gender and condition.
+```{r}
+table(heart$Sex,heart$HeartDisease)
+```
+It is evident from the table that there is an imbalance in the gender of the people considered in the study.
+However, it is medically known that male individuals are more vulnerable to heart disease because oestrogen, which is more prevalent in females, protects against certain heart diseases.
+
+```{r}
+table(heart$FastingBS,heart$HeartDisease)
+```
+The same argument can be made for the variable **FastingBS** as it is deeply unbalanced in the distribution.
+
+One feature that is certainly important is **ST_Slope**, as its slope is relevant to possible heart disease.
+From our studies the most favourable condition is a positive ST-slope, in contrast an electrocardiogram showing a flat ST-segment is the most adverse case.
+
+As one might expect, ageing results in an increased odds of experiencing cardiac problems.
+```{r}
+(sqrt(varianze[-c(2,3,4)]))
+```
+Since the numerical variables were standardized, the increase in the odds ratio is not the result of a one-unit increase in the variable, but rather of an increase equal to its standard deviation.
+Consequently, the 29.4% increase occurs every 9.6 years.
+
+Another warning sign is exercise-induced chest pain, which represents a significant symptom in the identification of potential heart disease.
+
+Finally, it is interesting to observe that the categories of chest pain perceived as less concerning by patients are typical angina, atypical angina, and non-anginal pain.
+Curiously, individuals without chest pain turn out to be the ones at highest risk.
+
+The model we estimated after careful analysis showed good adaptability to the test set and excellent predictive capabilities.
+Although the primary focus during model selection was on its ability to identify diseased individuals, it achieved outstanding all-around performance.
+
+Machine Learning models of this kind have gained significant traction in the biomedical field in recent times, proving to be valid and reliable not only from a theoretical standpoint but also in practical applications.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
